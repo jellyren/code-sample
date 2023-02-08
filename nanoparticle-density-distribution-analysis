@@ -1,0 +1,152 @@
+!pip install ovito
+from ovito.data import *
+from ovito.vis import *
+from ovito.io import *
+from ovito.modifiers import *
+import numpy as np
+from ovito.pipeline import *
+import pandas as pd
+
+def create(frame: int, data: DataCollection):
+    
+    # Create the Particles data object (unless it already exists from a previous run) and fill
+    # the 'Position' property array with coordinates of three particles.
+    if not data.particles: data.particles = Particles()
+    data.particles_.count = 3
+    data.particles_.create_property('Position', data=[(-0.06, 1.83, 0.81),(1.79, -0.88, -0.11),(-1.73, -0.77, -0.61)])
+    
+    # Create the 'Particle Type' property and add three ParticleType objects to 
+    # it (unless they already exist from a previous script run).
+    type_property = data.particles_.create_property('Particle Type')
+    if len(type_property.types) == 0: 
+        type_property.types.append(ParticleType(id=1, name='Red', color=(1,0,0)))
+        type_property.types.append(ParticleType(id=2, name='Green', color=(0,1,0)))
+        type_property.types.append(ParticleType(id=3, name='Blue', color=(0,0,1)))
+    type_property[...] = [1, 2, 3]
+    
+    # Create a Bonds object and attached it to the Particles object. 
+    # Create the 'Topology' bond property array and fill it with the connectivity 
+    # information for three bonds.
+    if not data.particles.bonds: data.particles_.bonds = Bonds(vis = BondsVis(width=0.6))
+    data.particles_.bonds_.count = 3
+    data.particles_.bonds_.create_property('Topology', data = [(0,1),(1,2),(2,0)])
+    
+    # Create a SimulationCell object in the data collection (unless it already exists 
+    # from a previous pass) and initialize the geometry by setting the 3x4 cell matrix.
+    if not data.cell: data.cell = SimulationCell(pbc=(False, False, False), vis=SimulationCellVis(line_width=0.03))
+    data.cell_[:,:3] = [[10,0,0],[0,10,0],[0,0,10]]
+    data.cell_[:,3] = [-5,-5,-5]
+
+
+#find center of mass
+pipeline = import_file("d5.cfg")
+pipeline.modifiers.append(ClusterAnalysisModifier(
+    cutoff=3.2,
+    sort_by_size=True,
+    compute_com=True))
+export_file(pipeline,'d5out.txt','txt/table', key='clusters')
+data = pipeline.compute()
+cluster_table=data.tables['clusters']
+print("Centers of mass:")
+#print(cluster_table['Center of Mass'][...])
+COM=cluster_table['Center of Mass'][0]
+#convert list[] to brackets()
+COMco=(COM[0],COM[1],COM[2])
+print(COMco)
+#get total number of particles in the system
+COMind=cluster_table['Cluster Size'][...]
+COMid=COMind+1
+
+
+#particles = Particles()
+#data = DataCollection()
+#data.objects.append(particles)
+#pos_prop = particles.create_property('Position', data=COMco)
+#type_prop = particles.create_property('Particle Type')
+#type_prop.types.append(ParticleType(id = 3, name = 'Center', color = (0.0,1.0,0.0)))
+#particles.identifiers(COMind) = COMid
+
+def create_COM(frame, data):
+
+  data.particles_.create_particle(COMco)
+  data.particles_.particle_type[COMind] = 3
+  data.particles_.identifiers[COMind] = COMid
+
+pipeline.modifiers.append(create_COM)
+data = pipeline.compute()
+
+print('\n')
+def modify(frame,data,a,b):
+    vec=data.particles.delta_vector(a,b,data.cell,return_pbcvec=False)
+    return np.linalg.norm(vec)
+
+
+print('find coordinates')   
+coordsa=data.particles.positions[0]
+print(f'coordinate of point of interested:{coordsa}')
+coordcm=data.particles.positions[COMind]
+print(f'coordinate of center of mass:{coordcm}')
+
+
+print('\n')
+print('find distance')
+vec=[]
+for i in range(COMind[0]):#convert list to int get range
+    vec.append(modify(1,data,i,COMind))
+print(vec[0:10]) #all distance from COM
+print(len(vec))
+print(f'Closest atom is {min(vec)} away')
+print(f'Furthest atom is {max(vec)} away')
+print('!!check if max is close to radius (diameter/2)!!\n')
+
+#remove COM from reserve
+pipeline.modifiers.append(SelectTypeModifier(operate_on = "particles", property = "Particle Type", types = {3}))
+pipeline.modifiers.append(DeleteSelectedModifier())
+data=pipeline.compute()
+#add distance to a new property
+data.particles_.create_property('Distance from Center of Mass', data=vec)
+
+Type_a=data.particles['Particle Type']
+Type1_dis=[]
+Type2_dis=[]
+for i in range(COMind[0]):
+    if Type_a[i] ==1:
+        Type1_dis.append(vec[i])
+    if Type_a[i] ==2:
+        Type2_dis.append(vec[i])
+
+df1=pd.DataFrame({'Zr':Type1_dis})
+bins=np.arange(0,max(vec),0.2)#in unit of A, we want last one to be 0.1
+group_names=range(len(bins)-1)
+df1['group by distance']=pd.cut(df1['Zr'],bins,labels=group_names)
+print(df1)
+
+df2=pd.DataFrame({'Cu':Type2_dis})
+print(df2)
+df2['group by distance']=pd.cut(df2['Cu'],bins,labels=group_names)
+print(df2)
+sum1=df1.pivot_table(columns=['group by distance'],aggfunc='size')
+print(sum1)
+sum2=df2.pivot_table(columns=['group by distance'],aggfunc='size')
+print(sum2)
+dfsum=pd.DataFrame({'Zr':sum1,'Cu':sum2})
+dfsum['sum']=dfsum['Zr']+dfsum['Cu']
+dfsum['Cu%']=dfsum['Cu']/dfsum['sum']
+print(dfsum)
+import matplotlib.pyplot as plt
+from scipy.interpolate import splrep,splev
+y=dfsum['Cu%']
+x=np.array(bins[1:])#representing sum of points from last x value to current displaying x value (distance)
+x3=max(vec)-x[y<=1]
+y3=y[y<=1]
+x2_5=x3[x3<=10]
+y2_5=y3[x3<=10]
+plt.plot(x2_5,y2_5,'o')
+plt.xlabel("distance from surface (Å)")
+plt.ylabel("percentage of Cu")
+plt.xlim([0,10])
+import statsmodels.api as sm
+y_lowess_5=sm.nonparametric.lowess(y2_5,x2_5,frac=0.1)
+plt.plot(y_lowess_5[:,0],y_lowess_5[:,1])
+average5=np.mean(y3)
+print(average5)
